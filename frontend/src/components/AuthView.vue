@@ -35,7 +35,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref } from 'vue'
 import { useAuth } from '@/composables/useAuth'
 
 const emit = defineEmits(['authenticated'])

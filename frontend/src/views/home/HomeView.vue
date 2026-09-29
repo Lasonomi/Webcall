@@ -902,6 +902,21 @@
       </section>
     </div>
 
+    <Dialog :open="groupOpen" title="New group DM" description="Select friends and name your group." @close="groupOpen = false">
+      <div class="ui-field mt-2">
+        <Label>Group name</Label>
+        <Input v-model="groupName" placeholder="Study group" />
+      </div>
+      <div class="mt-3 space-y-1 max-h-48 overflow-auto">
+        <label v-for="f in friends" :key="f.id" class="flex items-center gap-2 p-2 rounded hover:bg-[var(--wc-surface-2)] cursor-pointer">
+          <input type="checkbox" :value="f.id" v-model="groupSelected" />
+          <UserAvatar size="sm" :name="f.display_name || f.username" :src="f.avatar_url || ''" />
+          <span class="text-sm">{{ f.display_name }}</span>
+        </label>
+      </div>
+      <Button class="w-full mt-3" :disabled="groupSelected.length < 1" @click="submitGroup">Create group</Button>
+    </Dialog>
+
     <UserProfileCard
       :open="profileOpen"
       :user-id="profileUserId"
@@ -926,87 +941,8 @@
       @unblock="ctxAction('unblock')"
     />
   </div>
-  <!-- Group DM Dialog -->
-<Dialog v-model:open="groupOpen">
-  <DialogContent>
-    <DialogHeader>
-      <DialogTitle>New group DM</DialogTitle>
-
-      <DialogDescription>
-        Select friends and name your group.
-      </DialogDescription>
-    </DialogHeader>
-
-    <div class="ui-field mt-2">
-      <Label>Group name</Label>
-
-      <Input
-        v-model="groupName"
-        placeholder="Study group"
-      />
-    </div>
-
-    <div class="mt-3 space-y-1 max-h-48 overflow-auto">
-      <label
-        v-for="f in friends"
-        :key="f.id"
-        class="flex items-center gap-2 p-2 rounded hover:bg-[var(--wc-surface-2)] cursor-pointer"
-      >
-        <input
-          type="checkbox"
-          :value="f.id"
-          v-model="groupSelected"
-        />
-
-        <UserAvatar
-          size="sm"
-          :name="f.display_name || f.username"
-          :src="f.avatar_url || ''"
-        />
-
-        <span class="text-sm">
-          {{ f.display_name }}
-        </span>
-      </label>
-    </div>
-
-    <DialogFooter>
-      <Button
-        class="w-full"
-        :disabled="groupSelected.length < 1"
-        @click="submitGroup"
-      >
-        Create group
-      </Button>
-    </DialogFooter>
-  </DialogContent>
-</Dialog>
-
-<UserProfileCard
-  :open="profileOpen"
-  :user-id="profileUserId"
-  :self-id="user?.id || ''"
-  @close="profileOpen = false"
-  @message="openDMWith"
-  @changed="loadFriends"
-/>
-
-<UserContextMenu
-  :open="ctxMenu.open"
-  :x="ctxMenu.x"
-  :y="ctxMenu.y"
-  :relationship="ctxMenu.relationship"
-  @view-profile="ctxAction('view')"
-  @message="ctxAction('message')"
-  @add-friend="ctxAction('add')"
-  @cancel-request="ctxAction('cancel')"
-  @accept="ctxAction('accept')"
-  @decline="ctxAction('decline')"
-  @remove-friend="ctxAction('remove')"
-  @block="ctxAction('block')"
-  @unblock="ctxAction('unblock')"
-/>
 </template>
+
 
 <script setup>
 import { computed, nextTick, onMounted, ref, watch } from 'vue'

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,15 +38,16 @@ type client struct {
 
 // Hub manages voice rooms and WebSocket signaling (mesh coordination).
 type Hub struct {
-	mu         sync.RWMutex
-	clients    map[*client]bool
+	mu      sync.RWMutex
+	clients map[*client]bool
 	// channelID -> userID -> client
-	rooms      map[string]map[string]*client
+	rooms map[string]map[string]*client
 	// userID -> client (one voice session per user)
-	byUser     map[string]*client
-	register   chan *client
-	unregister chan *client
-	upgrader   websocket.Upgrader
+	byUser        map[string]*client
+	register      chan *client
+	unregister    chan *client
+	upgrader      websocket.Upgrader
+	authorizeJoin func(userID, serverID, channelID, peerID string) error
 }
 
 func NewHub(allowedOrigin string) *Hub {
@@ -59,16 +61,26 @@ func NewHub(allowedOrigin string) *Hub {
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
 			CheckOrigin: func(r *http.Request) bool {
-				origin := r.Header.Get("Origin")
-				if allowedOrigin == "" || allowedOrigin == "*" {
+				origin := strings.TrimRight(strings.TrimSpace(r.Header.Get("Origin")), "/")
+				if origin == "" {
 					return true
 				}
-				return origin == allowedOrigin || origin == ""
+				for _, allowed := range strings.Split(allowedOrigin, ",") {
+					allowed = strings.TrimRight(strings.TrimSpace(allowed), "/")
+					if allowed == "*" || allowed == origin {
+						return true
+					}
+				}
+				return allowedOrigin == ""
 			},
 		},
 	}
 	go h.run()
 	return h
+}
+
+func (h *Hub) SetJoinAuthorizer(fn func(userID, serverID, channelID, peerID string) error) {
+	h.authorizeJoin = fn
 }
 
 func (h *Hub) run() {
@@ -112,7 +124,7 @@ func (h *Hub) removeClientLocked(c *client) {
 			} else {
 				// notify remaining
 				h.broadcastRoomLocked(c.channelID, map[string]any{
-					"type":      "voice:leave",
+					"type":       "voice:leave",
 					"channel_id": c.channelID,
 					"server_id":  c.serverID,
 					"user": map[string]any{
@@ -286,6 +298,12 @@ func (h *Hub) handleJoin(c *client, msg map[string]any) {
 	if channelID == "" || serverID == "" || peerID == "" {
 		h.sendTo(c, map[string]any{"type": "error", "message": "channel_id, server_id, and peer_id are required"})
 		return
+	}
+	if h.authorizeJoin != nil {
+		if err := h.authorizeJoin(c.userID, serverID, channelID, peerID); err != nil {
+			h.sendTo(c, map[string]any{"type": "error", "message": err.Error()})
+			return
+		}
 	}
 
 	h.mu.Lock()

@@ -55,14 +55,14 @@ type Channel struct {
 }
 
 type ChannelMessage struct {
-	ID             string    `json:"id"`
-	ServerID       string    `json:"server_id"`
-	ChannelID      string    `json:"channel_id"`
-	UserID         string    `json:"user_id"`
-	Username       string    `json:"username"`
-	DisplayName    string    `json:"display_name"`
-	AvatarURL      string    `json:"avatar_url,omitempty"`
-	Content        string    `json:"content"`
+	ID             string     `json:"id"`
+	ServerID       string     `json:"server_id"`
+	ChannelID      string     `json:"channel_id"`
+	UserID         string     `json:"user_id"`
+	Username       string     `json:"username"`
+	DisplayName    string     `json:"display_name"`
+	AvatarURL      string     `json:"avatar_url,omitempty"`
+	Content        string     `json:"content"`
 	AttachmentURL  string     `json:"attachment_url,omitempty"`
 	AttachmentType string     `json:"attachment_type,omitempty"`
 	ReplyToID      string     `json:"reply_to_id,omitempty"`
@@ -126,16 +126,47 @@ func (s *Store) migrateServers() error {
   channel_id VARCHAR(64) NOT NULL,
   user_id VARCHAR(64) NOT NULL,
   content TEXT NOT NULL,
+  attachment_url TEXT NULL,
+  attachment_type VARCHAR(40) NULL,
+  reply_to_id VARCHAR(64) NULL,
   created_at DATETIME(6) NOT NULL,
+  updated_at DATETIME(6) NULL,
+  deleted_at DATETIME(6) NULL,
   KEY idx_cm_channel (channel_id, created_at),
   CONSTRAINT fk_cm_server FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE,
   CONSTRAINT fk_cm_channel FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE,
   CONSTRAINT fk_cm_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS channel_reactions (
+  message_id VARCHAR(64) NOT NULL,
+  user_id VARCHAR(64) NOT NULL,
+  emoji VARCHAR(32) NOT NULL,
+  created_at DATETIME(6) NOT NULL,
+  PRIMARY KEY (message_id, user_id, emoji),
+  KEY idx_cr_user (user_id),
+  CONSTRAINT fk_cr_msg FOREIGN KEY (message_id) REFERENCES channel_messages(id) ON DELETE CASCADE,
+  CONSTRAINT fk_cr_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	}
 	for _, q := range stmts {
 		if _, err := s.db.Exec(q); err != nil {
 			return err
+		}
+	}
+	// Keep older databases compatible with the current message model.
+	legacyColumns := []string{
+		`ALTER TABLE channel_messages ADD COLUMN attachment_url TEXT NULL`,
+		`ALTER TABLE channel_messages ADD COLUMN attachment_type VARCHAR(40) NULL`,
+		`ALTER TABLE channel_messages ADD COLUMN reply_to_id VARCHAR(64) NULL`,
+		`ALTER TABLE channel_messages ADD COLUMN updated_at DATETIME(6) NULL`,
+		`ALTER TABLE channel_messages ADD COLUMN deleted_at DATETIME(6) NULL`,
+	}
+	for _, q := range legacyColumns {
+		if _, err := s.db.Exec(q); err != nil {
+			msg := strings.ToLower(err.Error())
+			if !strings.Contains(msg, "duplicate column") && !strings.Contains(msg, "1060") && !strings.Contains(msg, "exists") {
+				return err
+			}
 		}
 	}
 	return nil
@@ -596,6 +627,17 @@ func (s *Store) ListChannelMessages(serverID, channelID, userID string) ([]Chann
 		return nil, err
 	}
 
+	var channelServerID string
+	err = s.db.QueryRow(`SELECT server_id FROM channels WHERE id = ?`, channelID).Scan(&channelServerID)
+	if err == sql.ErrNoRows {
+		return nil, errors.New("channel not found")
+	} else if err != nil {
+		return nil, err
+	}
+	if channelServerID != serverID {
+		return nil, errors.New("channel does not belong to this server")
+	}
+
 	rows, err := s.db.Query(`
 SELECT cm.id, cm.server_id, cm.channel_id, cm.user_id, u.username, u.display_name, COALESCE(u.avatar_url,''), cm.content,
   COALESCE(cm.attachment_url,''), COALESCE(cm.attachment_type,''), COALESCE(cm.reply_to_id,''), cm.created_at, cm.updated_at, cm.deleted_at
@@ -782,6 +824,17 @@ func (s *Store) CreateChannelMessage(serverID, channelID, userID, content, attac
 		return nil, errors.New("access denied: you are not a member of this server")
 	} else if err != nil {
 		return nil, err
+	}
+
+	var channelServerID string
+	err = s.db.QueryRow(`SELECT server_id FROM channels WHERE id = ?`, channelID).Scan(&channelServerID)
+	if err == sql.ErrNoRows {
+		return nil, errors.New("channel not found")
+	} else if err != nil {
+		return nil, err
+	}
+	if channelServerID != serverID {
+		return nil, errors.New("channel does not belong to this server")
 	}
 
 	author, err := s.getByIDLocked(userID)

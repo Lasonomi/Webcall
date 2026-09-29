@@ -38,7 +38,8 @@ func (r *Router) createConversation(w http.ResponseWriter, req *http.Request) {
 	conv, err := r.store.GetOrCreateDM(currentUserID(req), in.UserID)
 	if err != nil {
 		status := http.StatusBadRequest
-		if strings.Contains(err.Error(), "blocked") {
+		msg := err.Error()
+		if strings.Contains(msg, "blocked") || strings.Contains(msg, "not accepting direct messages") || strings.Contains(msg, "only accepts direct messages") {
 			status = http.StatusForbidden
 		}
 		writeError(w, status, err.Error())
@@ -151,13 +152,16 @@ func (r *Router) updateDMMessage(w http.ResponseWriter, req *http.Request) {
 
 func (r *Router) deleteDMMessage(w http.ResponseWriter, req *http.Request) {
 	id := req.PathValue("id")
-	err := r.store.DeleteDMMessage(id, currentUserID(req))
-	if err != nil {
+	members := r.store.ConversationMemberIDsFromMessage(id)
+	if err := r.store.DeleteDMMessage(id, currentUserID(req)); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if r.rt != nil {
-		r.rt.Publish([]string{currentUserID(req)}, map[string]any{
+		if len(members) == 0 {
+			members = []string{currentUserID(req)}
+		}
+		r.rt.Publish(members, map[string]any{
 			"type":       "dm:delete",
 			"message_id": id,
 		})
@@ -173,13 +177,17 @@ func (r *Router) reactDMMessage(w http.ResponseWriter, req *http.Request) {
 	if !decodeJSON(w, req, &in) {
 		return
 	}
+	members := r.store.ConversationMemberIDsFromMessage(id)
 	reactions, err := r.store.ToggleReaction(id, currentUserID(req), in.Emoji)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if r.rt != nil {
-		r.rt.Publish([]string{currentUserID(req)}, map[string]any{
+		if len(members) == 0 {
+			members = []string{currentUserID(req)}
+		}
+		r.rt.Publish(members, map[string]any{
 			"type":       "dm:reaction",
 			"message_id": id,
 			"reactions":  reactions,

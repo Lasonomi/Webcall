@@ -75,6 +75,17 @@ export function useDM() {
     return data.conversation
   }
 
+  const createGroup = async (memberIds, name) => {
+    const ids = Array.isArray(memberIds) ? memberIds.filter(Boolean) : []
+    if (ids.length < 1) throw new Error('Select at least one friend')
+    const data = await api.createGroupConversation(ids, name || 'Group')
+    await loadConversations()
+    if (data.conversation?.id) {
+      await openConversation(data.conversation.id)
+    }
+    return data.conversation
+  }
+
   const closeConversation = () => {
     activeConversationId.value = null
     activeConversation.value = null
@@ -271,7 +282,7 @@ export function useDM() {
       JSON.stringify({
         type: 'dm:typing',
         conversation_id: activeConversationId.value,
-        to_user_id: peerId
+        targets: [peerId]
       })
     )
   }
@@ -306,6 +317,7 @@ export function useDM() {
     loadConversations,
     openConversation,
     startDM,
+    createGroup,
     closeConversation,
     sendMessage,
     editMessage,

@@ -188,7 +188,6 @@ func (s *Store) scanUser(row interface{ Scan(dest ...any) error }) (*User, error
 	return &u, nil
 }
 
-
 func (s *Store) GetByID(id string) *User {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

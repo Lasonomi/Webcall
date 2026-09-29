@@ -221,7 +221,6 @@ func (r *Router) createChannelMessage(w http.ResponseWriter, req *http.Request) 
 	writeJSON(w, http.StatusCreated, map[string]any{"message": msg})
 }
 
-
 func (r *Router) updateChannelMessage(w http.ResponseWriter, req *http.Request) {
 	id := req.PathValue("messageId")
 	var in struct {

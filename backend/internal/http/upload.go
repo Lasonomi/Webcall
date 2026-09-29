@@ -91,11 +91,11 @@ func (r *Router) uploadFile(w http.ResponseWriter, req *http.Request) {
 	// Public URL path
 	urlPath := "/uploads/" + name
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"url":       urlPath,
-		"filename":  header.Filename,
-		"size":      written,
-		"mime_type": mime,
-		"type":      mimeCategory(mime),
+		"url":        urlPath,
+		"filename":   header.Filename,
+		"size":       written,
+		"mime_type":  mime,
+		"type":       mimeCategory(mime),
 		"created_at": time.Now().UTC(),
 	})
 }
@@ -133,4 +133,3 @@ func (r *Router) serveUpload(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	http.ServeFile(w, req, path)
 }
-

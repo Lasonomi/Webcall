@@ -18,29 +18,29 @@ const (
 
 // Privacy constants
 const (
-	PrivacyEveryone          = "everyone"
-	PrivacyServerMembers     = "server_members"
-	PrivacyFriendsOfFriends  = "friends_of_friends"
-	PrivacyFriendsOnly       = "friends_only"
-	PrivacyNobody            = "nobody"
-	PrivacyPublic            = "public"
+	PrivacyEveryone         = "everyone"
+	PrivacyServerMembers    = "server_members"
+	PrivacyFriendsOfFriends = "friends_of_friends"
+	PrivacyFriendsOnly      = "friends_only"
+	PrivacyNobody           = "nobody"
+	PrivacyPublic           = "public"
 )
 
 // PublicProfile is the safe DTO — never includes email, password, tokens, etc.
 type PublicProfile struct {
-	ID              string       `json:"id"`
-	Username        string       `json:"username"`
-	DisplayName     string       `json:"display_name"`
-	AvatarURL       string       `json:"avatar_url,omitempty"`
-	BannerURL       string       `json:"banner_url,omitempty"`
-	Bio             string       `json:"bio,omitempty"`
-	CustomStatus    string       `json:"custom_status,omitempty"`
-	Online          bool         `json:"online"`
-	PeerID          string       `json:"peer_id,omitempty"`
-	CreatedAt       time.Time    `json:"created_at"`
-	Relationship    string       `json:"relationship"` // NONE | PENDING_SENT | PENDING_RECEIVED | FRIENDS | BLOCKED
-	MutualFriends   int          `json:"mutual_friends,omitempty"`
-	MutualServers   []MutualServer `json:"mutual_servers,omitempty"`
+	ID            string         `json:"id"`
+	Username      string         `json:"username"`
+	DisplayName   string         `json:"display_name"`
+	AvatarURL     string         `json:"avatar_url,omitempty"`
+	BannerURL     string         `json:"banner_url,omitempty"`
+	Bio           string         `json:"bio,omitempty"`
+	CustomStatus  string         `json:"custom_status,omitempty"`
+	Online        bool           `json:"online"`
+	PeerID        string         `json:"peer_id,omitempty"`
+	CreatedAt     time.Time      `json:"created_at"`
+	Relationship  string         `json:"relationship"` // NONE | PENDING_SENT | PENDING_RECEIVED | FRIENDS | BLOCKED
+	MutualFriends int            `json:"mutual_friends,omitempty"`
+	MutualServers []MutualServer `json:"mutual_servers,omitempty"`
 }
 
 type MutualServer struct {
@@ -154,13 +154,16 @@ func (s *Store) getByIDLocked(id string) (*User, error) {
 	return u, nil
 }
 
-func (s *Store) Relationship(viewerID, targetID string) string {
+func (s *Store) relationshipLocked(viewerID, targetID string) string {
 	if viewerID == "" || targetID == "" || viewerID == targetID {
 		return RelNone
 	}
-	// Blocked (either direction → treat as blocked for actions)
+	// A block in either direction prevents normal social actions.
 	var n int
-	_ = s.db.QueryRow(`SELECT COUNT(1) FROM user_blocks WHERE blocker_id = ? AND blocked_id = ?`, viewerID, targetID).Scan(&n)
+	_ = s.db.QueryRow(`
+SELECT COUNT(1) FROM user_blocks
+WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?)`,
+		viewerID, targetID, targetID, viewerID).Scan(&n)
 	if n > 0 {
 		return RelBlocked
 	}
@@ -177,6 +180,12 @@ func (s *Store) Relationship(viewerID, targetID string) string {
 		return RelPendingReceived
 	}
 	return RelNone
+}
+
+func (s *Store) Relationship(viewerID, targetID string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.relationshipLocked(viewerID, targetID)
 }
 
 func (s *Store) GetMyProfile(userID string) (*MyProfile, error) {
@@ -283,13 +292,19 @@ func validPrivacyDM(v string) bool {
 	return false
 }
 
-func (s *Store) shareServer(a, b string) bool {
+func (s *Store) shareServerLocked(a, b string) bool {
 	var n int
 	_ = s.db.QueryRow(`
 SELECT COUNT(1) FROM server_members a
 JOIN server_members b ON a.server_id = b.server_id
 WHERE a.user_id = ? AND b.user_id = ?`, a, b).Scan(&n)
 	return n > 0
+}
+
+func (s *Store) shareServer(a, b string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.shareServerLocked(a, b)
 }
 
 func (s *Store) canViewProfile(viewerID, targetID string, target *User) bool {
@@ -301,12 +316,12 @@ func (s *Store) canViewProfile(viewerID, targetID string, target *User) bool {
 		return true
 	}
 	// friends only
-	rel := s.Relationship(viewerID, targetID)
+	rel := s.relationshipLocked(viewerID, targetID)
 	return rel == RelFriends
 }
 
 func (s *Store) canSendFriendRequest(viewerID, targetID string, target *User) error {
-	rel := s.Relationship(viewerID, targetID)
+	rel := s.relationshipLocked(viewerID, targetID)
 	if rel == RelFriends {
 		return errors.New("already friends")
 	}
@@ -333,7 +348,7 @@ func (s *Store) canSendFriendRequest(viewerID, targetID string, target *User) er
 	case PrivacyFriendsOnly:
 		return errors.New("this user only accepts requests from friends of friends context restricted")
 	case PrivacyServerMembers:
-		if !s.shareServer(viewerID, targetID) {
+		if !s.shareServerLocked(viewerID, targetID) {
 			return errors.New("this user only accepts requests from server members")
 		}
 	case PrivacyFriendsOfFriends:
@@ -343,7 +358,7 @@ func (s *Store) canSendFriendRequest(viewerID, targetID string, target *User) er
 SELECT COUNT(1) FROM friendships f1
 JOIN friendships f2 ON f1.friend_id = f2.friend_id
 WHERE f1.user_id = ? AND f2.user_id = ?`, viewerID, targetID).Scan(&m)
-		if m == 0 && !s.shareServer(viewerID, targetID) {
+		if m == 0 && !s.shareServerLocked(viewerID, targetID) {
 			return errors.New("this user only accepts requests from friends of friends")
 		}
 	}
@@ -367,7 +382,7 @@ func (s *Store) GetPublicProfile(viewerID, targetID string) (*PublicProfile, err
 	if online {
 		peerID = target.PeerID
 	}
-	rel := s.Relationship(viewerID, targetID)
+	rel := s.relationshipLocked(viewerID, targetID)
 
 	pp := &PublicProfile{
 		ID: target.ID, Username: target.Username, DisplayName: target.DisplayName,

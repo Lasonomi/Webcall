@@ -1,4 +1,5 @@
-export const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:8080').replace(/\/$/, '')
+const configuredApiURL = String(import.meta.env.VITE_API_URL || '').trim()
+export const API_URL = (configuredApiURL || window.location.origin).replace(/\/$/, '')
 
 async function request(path, options = {}) {
   const headers = new Headers(options.headers || {})
@@ -22,7 +23,7 @@ export const api = {
     return request('/api/auth/register', { method: 'POST', body: JSON.stringify(payload) })
   },
   login(payload) {
-    return request('/api/auth/login', { method: 'POST', body: JSON.stringify(payload) })
+    return request('/api/auth/login', { method: 'POST',headers: {'Content-Type': 'application/json',}, body: JSON.stringify(payload) })
   },
   me() {
     return request('/api/me')
