@@ -8,32 +8,32 @@ import (
 )
 
 type Conversation struct {
-	ID          string      `json:"id"`
-	Type        string      `json:"type"` // dm | group
-	Name        string      `json:"name,omitempty"`
-	CreatedAt   time.Time   `json:"created_at"`
-	UpdatedAt   time.Time   `json:"updated_at"`
-	Peer        *PublicUser `json:"peer,omitempty"`
-	LastMessage *DMMessage  `json:"last_message,omitempty"`
-	UnreadCount int         `json:"unread_count"`
+	ID            string    `json:"id"`
+	Type          string    `json:"type"` // dm | group
+	Name          string    `json:"name,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	Peer          *PublicUser `json:"peer,omitempty"`
+	LastMessage   *DMMessage `json:"last_message,omitempty"`
+	UnreadCount   int       `json:"unread_count"`
 }
 
 type DMMessage struct {
-	ID             string       `json:"id"`
-	ConversationID string       `json:"conversation_id"`
-	SenderID       string       `json:"sender_id"`
-	SenderName     string       `json:"sender_name,omitempty"`
-	AvatarURL      string       `json:"avatar_url,omitempty"`
-	Content        string       `json:"content"`
-	ReplyToID      string       `json:"reply_to_id,omitempty"`
-	ReplyPreview   string       `json:"reply_preview,omitempty"`
-	AttachmentURL  string       `json:"attachment_url,omitempty"`
-	AttachmentType string       `json:"attachment_type,omitempty"`
-	CreatedAt      time.Time    `json:"created_at"`
-	UpdatedAt      time.Time    `json:"updated_at"`
-	DeletedAt      *time.Time   `json:"deleted_at,omitempty"`
-	IsMine         bool         `json:"is_mine,omitempty"`
-	ReadByPeer     bool         `json:"read_by_peer,omitempty"`
+	ID             string     `json:"id"`
+	ConversationID string     `json:"conversation_id"`
+	SenderID       string     `json:"sender_id"`
+	SenderName     string     `json:"sender_name,omitempty"`
+	AvatarURL      string     `json:"avatar_url,omitempty"`
+	Content        string     `json:"content"`
+	ReplyToID      string     `json:"reply_to_id,omitempty"`
+	ReplyPreview   string     `json:"reply_preview,omitempty"`
+	AttachmentURL  string     `json:"attachment_url,omitempty"`
+	AttachmentType string     `json:"attachment_type,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	DeletedAt      *time.Time `json:"deleted_at,omitempty"`
+	IsMine         bool       `json:"is_mine,omitempty"`
+	ReadByPeer     bool       `json:"read_by_peer,omitempty"`
 	Reactions      []DMReaction `json:"reactions,omitempty"`
 }
 
@@ -48,7 +48,6 @@ func (s *Store) migrateDM() error {
 		`CREATE TABLE IF NOT EXISTS conversations (
   id VARCHAR(64) PRIMARY KEY,
   type VARCHAR(20) NOT NULL DEFAULT 'dm',
-  name VARCHAR(120) NULL,
   created_at DATETIME(6) NOT NULL,
   updated_at DATETIME(6) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
@@ -100,29 +99,16 @@ func (s *Store) migrateDM() error {
 			return err
 		}
 	}
-	// Existing databases created before group names were introduced need the column too.
-	if _, err := s.db.Exec(`ALTER TABLE conversations ADD COLUMN name VARCHAR(120) NULL`); err != nil {
-		msg := strings.ToLower(err.Error())
-		if !strings.Contains(msg, "duplicate column") && !strings.Contains(msg, "1060") && !strings.Contains(msg, "exists") {
-			return err
-		}
-	}
 	return nil
 }
 
-func (s *Store) isBlockedLocked(a, b string) bool {
+func (s *Store) IsBlocked(a, b string) bool {
 	var n int
 	_ = s.db.QueryRow(`
 SELECT COUNT(1) FROM user_blocks
 WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?)`,
 		a, b, b, a).Scan(&n)
 	return n > 0
-}
-
-func (s *Store) IsBlocked(a, b string) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.isBlockedLocked(a, b)
 }
 
 func (s *Store) BlockUser(blockerID, blockedID string) error {
@@ -179,34 +165,10 @@ func (s *Store) isMemberLocked(conversationID, userID string) bool {
 
 // GetOrCreateDM finds existing 1:1 DM or creates one.
 
-func (s *Store) canSendDM(viewerID, targetID string, target *User) error {
-	priv := coalesce(target.PrivacyDM, PrivacyEveryone)
-	switch priv {
-	case PrivacyEveryone:
-		return nil
-	case PrivacyNobody:
-		return errors.New("this user is not accepting direct messages")
-	case PrivacyFriendsOnly:
-		if s.relationshipLocked(viewerID, targetID) != RelFriends {
-			return errors.New("this user only accepts direct messages from friends")
-		}
-	case PrivacyServerMembers:
-		if !s.shareServerLocked(viewerID, targetID) {
-			return errors.New("this user only accepts direct messages from shared server members")
-		}
-	default:
-		return nil
-	}
-	return nil
-}
-
 func (s *Store) CreateGroupConversation(ownerID string, memberIDs []string, name string) (*Conversation, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		name = "Group"
-	}
-	if len(name) > 120 {
-		return nil, errors.New("group name cannot exceed 120 characters")
 	}
 	// unique members including owner
 	set := map[string]bool{ownerID: true}
@@ -228,12 +190,6 @@ func (s *Store) CreateGroupConversation(ownerID string, memberIDs []string, name
 	}
 
 	s.mu.Lock()
-	for _, id := range ids {
-		u, err := s.getByIDLocked(id)
-		if err != nil || u == nil {
-			return nil, errors.New("group member not found")
-		}
-	}
 	defer s.mu.Unlock()
 
 	convID := newID()
@@ -247,10 +203,9 @@ func (s *Store) CreateGroupConversation(ownerID string, memberIDs []string, name
 	if _, err = tx.Exec(`INSERT INTO conversations (id, type, created_at, updated_at) VALUES (?, 'group', ?, ?)`, convID, now, now); err != nil {
 		return nil, err
 	}
-	_, err = tx.Exec(`UPDATE conversations SET name = ? WHERE id = ?`, name, convID)
-	if err != nil {
-		return nil, err
-	}
+	// store name in first system message or extend schema - use type group + optional name column
+	_, _ = tx.Exec(`ALTER TABLE conversations ADD COLUMN name VARCHAR(120) NULL`)
+	_, _ = tx.Exec(`UPDATE conversations SET name = ? WHERE id = ?`, name, convID)
 
 	for _, id := range ids {
 		if _, err = tx.Exec(`INSERT INTO conversation_members (conversation_id, user_id, joined_at) VALUES (?, ?, ?)`, convID, id, now); err != nil {
@@ -284,11 +239,8 @@ func (s *Store) GetOrCreateDM(userID, peerID string) (*Conversation, error) {
 	if err != nil || me == nil {
 		return nil, errors.New("user not found")
 	}
-	if s.isBlockedLocked(userID, peerID) {
+	if s.IsBlocked(userID, peerID) {
 		return nil, errors.New("cannot message this user (blocked)")
-	}
-	if err := s.canSendDM(userID, peerID, peer); err != nil {
-		return nil, err
 	}
 
 	// Existing DM between the two users
@@ -328,8 +280,8 @@ LIMIT 1`, userID, peerID).Scan(&convID)
 
 func (s *Store) getConversationLocked(convID, viewerID string) (*Conversation, error) {
 	var c Conversation
-	err := s.db.QueryRow(`SELECT id, type, COALESCE(name, ''), created_at, updated_at FROM conversations WHERE id = ?`, convID).
-		Scan(&c.ID, &c.Type, &c.Name, &c.CreatedAt, &c.UpdatedAt)
+	err := s.db.QueryRow(`SELECT id, type, created_at, updated_at FROM conversations WHERE id = ?`, convID).
+		Scan(&c.ID, &c.Type, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -539,7 +491,7 @@ func (s *Store) loadReactionsLocked(messageIDs []string) map[string][]DMReaction
 	return out
 }
 
-func (s *Store) CreateDMMessage(convID, senderID, content, replyToID, attachmentURL, attachmentType string) (*DMMessage, error) {
+func (s *Store) CreateDMMessage(convID, senderID, content, replyToID, attachmentURL, attachmentType, clientMessageID string) (*DMMessage, error) {
 	content = strings.TrimSpace(content)
 	if content == "" && strings.TrimSpace(attachmentURL) == "" {
 		return nil, errors.New("message cannot be empty")
@@ -555,19 +507,10 @@ func (s *Store) CreateDMMessage(convID, senderID, content, replyToID, attachment
 		return nil, errors.New("access denied")
 	}
 
-	// peer block/privacy checks for 1:1 DMs; group DMs are unaffected.
+	// peer block check
 	peerID := s.dmPeerLocked(convID, senderID)
-	if peerID != "" {
-		if s.isBlockedLocked(senderID, peerID) {
-			return nil, errors.New("cannot message this user (blocked)")
-		}
-		peer, peerErr := s.getByIDLocked(peerID)
-		if peerErr != nil || peer == nil {
-			return nil, errors.New("peer user not found")
-		}
-		if err := s.canSendDM(senderID, peerID, peer); err != nil {
-			return nil, err
-		}
+	if peerID != "" && s.IsBlocked(senderID, peerID) {
+		return nil, errors.New("cannot message this user (blocked)")
 	}
 
 	sender, err := s.getByIDLocked(senderID)
@@ -575,13 +518,27 @@ func (s *Store) CreateDMMessage(convID, senderID, content, replyToID, attachment
 		return nil, errors.New("sender not found")
 	}
 
+	clientMessageID = strings.TrimSpace(clientMessageID)
+	if clientMessageID != "" {
+		if existing, errEx := s.FindDMByClientID(convID, clientMessageID); errEx == nil && existing != nil {
+			existing.IsMine = existing.SenderID == senderID
+			return existing, nil
+		}
+	}
+
 	now := time.Now().UTC()
 	id := newID()
 	_, err = s.db.Exec(`
-INSERT INTO direct_messages (id, conversation_id, sender_id, content, reply_to_id, attachment_url, attachment_type, created_at, updated_at)
-VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?)`,
-		id, convID, senderID, content, replyToID, attachmentURL, attachmentType, now, now)
+INSERT INTO direct_messages (id, conversation_id, sender_id, content, reply_to_id, attachment_url, attachment_type, client_message_id, created_at, updated_at)
+VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?)`,
+		id, convID, senderID, content, replyToID, attachmentURL, attachmentType, clientMessageID, now, now)
 	if err != nil {
+		// unique violation → return existing
+		if clientMessageID != "" {
+			if existing, errEx := s.FindDMByClientID(convID, clientMessageID); errEx == nil && existing != nil {
+				return existing, nil
+			}
+		}
 		return nil, err
 	}
 	_, _ = s.db.Exec(`UPDATE conversations SET updated_at = ? WHERE id = ?`, now, convID)
@@ -647,32 +604,6 @@ func (s *Store) UpdateDMMessage(messageID, userID, content string) (*DMMessage, 
 		return nil, err
 	}
 	return s.getMessageLocked(messageID, userID)
-}
-
-func (s *Store) ConversationMemberIDsFromMessage(messageID string) []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	var conversationID string
-	if err := s.db.QueryRow(`SELECT conversation_id FROM direct_messages WHERE id = ?`, messageID).Scan(&conversationID); err != nil {
-		return nil
-	}
-	return s.conversationMemberIDsLocked(conversationID)
-}
-
-func (s *Store) conversationMemberIDsLocked(convID string) []string {
-	rows, err := s.db.Query(`SELECT user_id FROM conversation_members WHERE conversation_id = ?`, convID)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	ids := make([]string, 0)
-	for rows.Next() {
-		var id string
-		if rows.Scan(&id) == nil {
-			ids = append(ids, id)
-		}
-	}
-	return ids
 }
 
 func (s *Store) DeleteDMMessage(messageID, userID string) error {
@@ -809,5 +740,5 @@ ORDER BY dm.created_at DESC LIMIT 50`, convID, like)
 func (s *Store) ConversationMemberIDs(convID string) []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.conversationMemberIDsLocked(convID)
+	return s.listIDs(`SELECT user_id FROM conversation_members WHERE conversation_id = ?`, convID)
 }

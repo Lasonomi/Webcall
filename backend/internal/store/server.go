@@ -45,13 +45,17 @@ type ServerInvite struct {
 }
 
 type Channel struct {
-	ID        string    `json:"id"`
-	ServerID  string    `json:"server_id"`
-	Name      string    `json:"name"`
-	Type      string    `json:"type"` // "text", "voice"
-	Category  string    `json:"category"`
-	Position  int       `json:"position"`
-	CreatedAt time.Time `json:"created_at"`
+	ID           string    `json:"id"`
+	ServerID     string    `json:"server_id"`
+	Name         string    `json:"name"`
+	Type         string    `json:"type"` // "text", "voice"
+	Category     string    `json:"category"`
+	Position     int       `json:"position"`
+	AllowMessage bool      `json:"allow_message"`
+	AllowUpload  bool      `json:"allow_upload"`
+	AllowVoice   bool      `json:"allow_voice"`
+	AllowVideo   bool      `json:"allow_video"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 type ChannelMessage struct {
@@ -116,6 +120,10 @@ func (s *Store) migrateServers() error {
   type VARCHAR(20) NOT NULL DEFAULT 'text',
   category VARCHAR(64) NOT NULL DEFAULT 'TEXT CHANNELS',
   position INT NOT NULL DEFAULT 0,
+  allow_message BOOLEAN NOT NULL DEFAULT TRUE,
+  allow_upload BOOLEAN NOT NULL DEFAULT FALSE,
+  allow_voice BOOLEAN NOT NULL DEFAULT FALSE,
+  allow_video BOOLEAN NOT NULL DEFAULT FALSE,
   created_at DATETIME(6) NOT NULL,
   KEY idx_channels_server (server_id),
   CONSTRAINT fk_channels_server FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
@@ -126,26 +134,11 @@ func (s *Store) migrateServers() error {
   channel_id VARCHAR(64) NOT NULL,
   user_id VARCHAR(64) NOT NULL,
   content TEXT NOT NULL,
-  attachment_url TEXT NULL,
-  attachment_type VARCHAR(40) NULL,
-  reply_to_id VARCHAR(64) NULL,
   created_at DATETIME(6) NOT NULL,
-  updated_at DATETIME(6) NULL,
-  deleted_at DATETIME(6) NULL,
   KEY idx_cm_channel (channel_id, created_at),
   CONSTRAINT fk_cm_server FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE,
   CONSTRAINT fk_cm_channel FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE,
   CONSTRAINT fk_cm_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-		`CREATE TABLE IF NOT EXISTS channel_reactions (
-  message_id VARCHAR(64) NOT NULL,
-  user_id VARCHAR(64) NOT NULL,
-  emoji VARCHAR(32) NOT NULL,
-  created_at DATETIME(6) NOT NULL,
-  PRIMARY KEY (message_id, user_id, emoji),
-  KEY idx_cr_user (user_id),
-  CONSTRAINT fk_cr_msg FOREIGN KEY (message_id) REFERENCES channel_messages(id) ON DELETE CASCADE,
-  CONSTRAINT fk_cr_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	}
 	for _, q := range stmts {
@@ -153,15 +146,12 @@ func (s *Store) migrateServers() error {
 			return err
 		}
 	}
-	// Keep older databases compatible with the current message model.
-	legacyColumns := []string{
-		`ALTER TABLE channel_messages ADD COLUMN attachment_url TEXT NULL`,
-		`ALTER TABLE channel_messages ADD COLUMN attachment_type VARCHAR(40) NULL`,
-		`ALTER TABLE channel_messages ADD COLUMN reply_to_id VARCHAR(64) NULL`,
-		`ALTER TABLE channel_messages ADD COLUMN updated_at DATETIME(6) NULL`,
-		`ALTER TABLE channel_messages ADD COLUMN deleted_at DATETIME(6) NULL`,
-	}
-	for _, q := range legacyColumns {
+	for _, q := range []string{
+		`ALTER TABLE channels ADD COLUMN allow_message BOOLEAN NOT NULL DEFAULT TRUE`,
+		`ALTER TABLE channels ADD COLUMN allow_upload BOOLEAN NOT NULL DEFAULT FALSE`,
+		`ALTER TABLE channels ADD COLUMN allow_voice BOOLEAN NOT NULL DEFAULT FALSE`,
+		`ALTER TABLE channels ADD COLUMN allow_video BOOLEAN NOT NULL DEFAULT FALSE`,
+	} {
 		if _, err := s.db.Exec(q); err != nil {
 			msg := strings.ToLower(err.Error())
 			if !strings.Contains(msg, "duplicate column") && !strings.Contains(msg, "1060") && !strings.Contains(msg, "exists") {
@@ -169,6 +159,7 @@ func (s *Store) migrateServers() error {
 			}
 		}
 	}
+	_, _ = s.db.Exec(`UPDATE channels SET allow_voice = TRUE, allow_video = TRUE WHERE type = 'voice'`)
 	return nil
 }
 
@@ -232,11 +223,11 @@ VALUES (?, ?, 'OWNER', ?)`, srvID, ownerID, now)
 	chanLoungeID := newID()
 
 	_, err = tx.Exec(`
-INSERT INTO channels (id, server_id, name, type, category, position, created_at)
+INSERT INTO channels (id, server_id, name, type, category, position, allow_message, allow_upload, allow_voice, allow_video, created_at)
 VALUES 
-  (?, ?, 'general', 'text', 'TEXT CHANNELS', 0, ?),
-  (?, ?, 'announcements', 'text', 'TEXT CHANNELS', 1, ?),
-  (?, ?, 'Lounge', 'voice', 'VOICE CHANNELS', 2, ?)`,
+  (?, ?, 'general', 'text', 'TEXT CHANNELS', 0, TRUE, TRUE, FALSE, FALSE, ?),
+  (?, ?, 'announcements', 'text', 'TEXT CHANNELS', 1, TRUE, FALSE, FALSE, FALSE, ?),
+  (?, ?, 'Lounge', 'voice', 'VOICE CHANNELS', 2, FALSE, FALSE, TRUE, TRUE, ?)`,
 		chanGeneralID, srvID, now,
 		chanAnnounceID, srvID, now,
 		chanLoungeID, srvID, now,
@@ -329,7 +320,7 @@ FROM servers s WHERE s.id = ?`, serverID).Scan(&srv.ID, &srv.Name, &srv.IconURL,
 
 	// Channels
 	cRows, err := s.db.Query(`
-SELECT id, server_id, name, type, category, position, created_at
+SELECT id, server_id, name, type, category, position, allow_message, allow_upload, allow_voice, allow_video, created_at
 FROM channels WHERE server_id = ? ORDER BY position ASC, created_at ASC`, serverID)
 	if err != nil {
 		return nil, nil, "", err
@@ -339,7 +330,7 @@ FROM channels WHERE server_id = ? ORDER BY position ASC, created_at ASC`, server
 	channels := make([]Channel, 0)
 	for cRows.Next() {
 		var ch Channel
-		if err := cRows.Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Type, &ch.Category, &ch.Position, &ch.CreatedAt); err == nil {
+		if err := cRows.Scan(&ch.ID, &ch.ServerID, &ch.Name, &ch.Type, &ch.Category, &ch.Position, &ch.AllowMessage, &ch.AllowUpload, &ch.AllowVoice, &ch.AllowVideo, &ch.CreatedAt); err == nil {
 			channels = append(channels, ch)
 		}
 	}
@@ -627,17 +618,6 @@ func (s *Store) ListChannelMessages(serverID, channelID, userID string) ([]Chann
 		return nil, err
 	}
 
-	var channelServerID string
-	err = s.db.QueryRow(`SELECT server_id FROM channels WHERE id = ?`, channelID).Scan(&channelServerID)
-	if err == sql.ErrNoRows {
-		return nil, errors.New("channel not found")
-	} else if err != nil {
-		return nil, err
-	}
-	if channelServerID != serverID {
-		return nil, errors.New("channel does not belong to this server")
-	}
-
 	rows, err := s.db.Query(`
 SELECT cm.id, cm.server_id, cm.channel_id, cm.user_id, u.username, u.display_name, COALESCE(u.avatar_url,''), cm.content,
   COALESCE(cm.attachment_url,''), COALESCE(cm.attachment_type,''), COALESCE(cm.reply_to_id,''), cm.created_at, cm.updated_at, cm.deleted_at
@@ -647,7 +627,26 @@ WHERE cm.server_id = ? AND cm.channel_id = ?
 ORDER BY cm.created_at ASC
 LIMIT 100`, serverID, channelID)
 	if err != nil {
-		return nil, err
+		// fallback without optional columns
+		rows, err = s.db.Query(`
+SELECT cm.id, cm.server_id, cm.channel_id, cm.user_id, u.username, u.display_name, COALESCE(u.avatar_url,''), cm.content, cm.created_at
+FROM channel_messages cm
+JOIN users u ON cm.user_id = u.id
+WHERE cm.server_id = ? AND cm.channel_id = ?
+ORDER BY cm.created_at ASC
+LIMIT 100`, serverID, channelID)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		messages := make([]ChannelMessage, 0)
+		for rows.Next() {
+			var msg ChannelMessage
+			if err := rows.Scan(&msg.ID, &msg.ServerID, &msg.ChannelID, &msg.UserID, &msg.Username, &msg.DisplayName, &msg.AvatarURL, &msg.Content, &msg.CreatedAt); err == nil {
+				messages = append(messages, msg)
+			}
+		}
+		return messages, nil
 	}
 	defer rows.Close()
 
@@ -807,7 +806,7 @@ func (s *Store) ToggleChannelReaction(messageID, userID, emoji string) ([]struct
 	return m[messageID], nil
 }
 
-func (s *Store) CreateChannelMessage(serverID, channelID, userID, content, attachmentURL, attachmentType, replyToID string) (*ChannelMessage, error) {
+func (s *Store) CreateChannelMessage(serverID, channelID, userID, content, attachmentURL, attachmentType, replyToID, clientMessageID string) (*ChannelMessage, error) {
 	content = strings.TrimSpace(content)
 	attachmentURL = strings.TrimSpace(attachmentURL)
 	replyToID = strings.TrimSpace(replyToID)
@@ -826,29 +825,51 @@ func (s *Store) CreateChannelMessage(serverID, channelID, userID, content, attac
 		return nil, err
 	}
 
-	var channelServerID string
-	err = s.db.QueryRow(`SELECT server_id FROM channels WHERE id = ?`, channelID).Scan(&channelServerID)
-	if err == sql.ErrNoRows {
-		return nil, errors.New("channel not found")
-	} else if err != nil {
-		return nil, err
-	}
-	if channelServerID != serverID {
-		return nil, errors.New("channel does not belong to this server")
-	}
-
 	author, err := s.getByIDLocked(userID)
 	if err != nil || author == nil {
 		return nil, errors.New("author not found")
 	}
 
+	clientMessageID = strings.TrimSpace(clientMessageID)
+	if clientMessageID != "" {
+		var existing ChannelMessage
+		var attURL, attType, reply sql.NullString
+		errEx := s.db.QueryRow(`
+SELECT id, server_id, channel_id, user_id, content, COALESCE(attachment_url,''), COALESCE(attachment_type,''), COALESCE(reply_to_id,''), created_at
+FROM channel_messages WHERE channel_id = ? AND client_message_id = ? LIMIT 1`, channelID, clientMessageID).
+			Scan(&existing.ID, &existing.ServerID, &existing.ChannelID, &existing.UserID, &existing.Content, &attURL, &attType, &reply, &existing.CreatedAt)
+		if errEx == nil {
+			existing.AttachmentURL = attURL.String
+			existing.AttachmentType = attType.String
+			existing.ReplyToID = reply.String
+			if author != nil {
+				existing.Username = author.Username
+				existing.DisplayName = author.DisplayName
+				existing.AvatarURL = author.AvatarURL
+			}
+			return &existing, nil
+		}
+	}
+
+	// ensure channel conversation exists (unified model)
+	if _, errConv := s.EnsureChannelConversation(serverID, channelID); errConv != nil {
+		_ = errConv
+	}
+
 	msgID := newID()
 	now := time.Now().UTC()
+	// Prefer full schema; fall back if columns missing
 	_, err = s.db.Exec(`
-INSERT INTO channel_messages (id, server_id, channel_id, user_id, content, attachment_url, attachment_type, reply_to_id, created_at)
-VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?)`, msgID, serverID, channelID, userID, content, attachmentURL, attachmentType, replyToID, now)
+INSERT INTO channel_messages (id, server_id, channel_id, user_id, content, attachment_url, attachment_type, reply_to_id, client_message_id, created_at)
+VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?)`, msgID, serverID, channelID, userID, content, attachmentURL, attachmentType, replyToID, clientMessageID, now)
 	if err != nil {
-		return nil, err
+		// fallback: core columns only
+		_, err2 := s.db.Exec(`
+INSERT INTO channel_messages (id, server_id, channel_id, user_id, content, created_at)
+VALUES (?, ?, ?, ?, ?, ?)`, msgID, serverID, channelID, userID, content, now)
+		if err2 != nil {
+			return nil, err // return original richer error
+		}
 	}
 
 	return &ChannelMessage{
@@ -917,4 +938,8 @@ func (s *Store) GetChannelMeta(channelID, userID string) (serverID, name, chType
 		return "", "", "", "", err
 	}
 	return serverID, name, chType, role, nil
+}
+
+func (s *Store) ServerMemberIDs(serverID string) []string {
+	return s.listIDs(`SELECT user_id FROM server_members WHERE server_id = ?`, serverID)
 }

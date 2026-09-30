@@ -38,8 +38,7 @@ func (r *Router) createConversation(w http.ResponseWriter, req *http.Request) {
 	conv, err := r.store.GetOrCreateDM(currentUserID(req), in.UserID)
 	if err != nil {
 		status := http.StatusBadRequest
-		msg := err.Error()
-		if strings.Contains(msg, "blocked") || strings.Contains(msg, "not accepting direct messages") || strings.Contains(msg, "only accepts direct messages") {
+		if strings.Contains(err.Error(), "blocked") {
 			status = http.StatusForbidden
 		}
 		writeError(w, status, err.Error())
@@ -90,15 +89,16 @@ func (r *Router) listDMMessages(w http.ResponseWriter, req *http.Request) {
 func (r *Router) createDMMessage(w http.ResponseWriter, req *http.Request) {
 	id := req.PathValue("id")
 	var in struct {
-		Content        string `json:"content"`
-		ReplyToID      string `json:"reply_to_id"`
-		AttachmentURL  string `json:"attachment_url"`
-		AttachmentType string `json:"attachment_type"`
+		Content         string `json:"content"`
+		ReplyToID       string `json:"reply_to_id"`
+		AttachmentURL   string `json:"attachment_url"`
+		AttachmentType  string `json:"attachment_type"`
+		ClientMessageID string `json:"client_message_id"`
 	}
 	if !decodeJSON(w, req, &in) {
 		return
 	}
-	msg, err := r.store.CreateDMMessage(id, currentUserID(req), in.Content, in.ReplyToID, in.AttachmentURL, in.AttachmentType)
+	msg, err := r.store.CreateDMMessage(id, currentUserID(req), in.Content, in.ReplyToID, in.AttachmentURL, in.AttachmentType, in.ClientMessageID)
 	if err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "access denied") || strings.Contains(err.Error(), "blocked") {
@@ -152,16 +152,13 @@ func (r *Router) updateDMMessage(w http.ResponseWriter, req *http.Request) {
 
 func (r *Router) deleteDMMessage(w http.ResponseWriter, req *http.Request) {
 	id := req.PathValue("id")
-	members := r.store.ConversationMemberIDsFromMessage(id)
-	if err := r.store.DeleteDMMessage(id, currentUserID(req)); err != nil {
+	err := r.store.DeleteDMMessage(id, currentUserID(req))
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if r.rt != nil {
-		if len(members) == 0 {
-			members = []string{currentUserID(req)}
-		}
-		r.rt.Publish(members, map[string]any{
+		r.rt.Publish([]string{currentUserID(req)}, map[string]any{
 			"type":       "dm:delete",
 			"message_id": id,
 		})
@@ -177,17 +174,13 @@ func (r *Router) reactDMMessage(w http.ResponseWriter, req *http.Request) {
 	if !decodeJSON(w, req, &in) {
 		return
 	}
-	members := r.store.ConversationMemberIDsFromMessage(id)
 	reactions, err := r.store.ToggleReaction(id, currentUserID(req), in.Emoji)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if r.rt != nil {
-		if len(members) == 0 {
-			members = []string{currentUserID(req)}
-		}
-		r.rt.Publish(members, map[string]any{
+		r.rt.Publish([]string{currentUserID(req)}, map[string]any{
 			"type":       "dm:reaction",
 			"message_id": id,
 			"reactions":  reactions,

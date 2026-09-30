@@ -1,33 +1,13 @@
-import { fileURLToPath, URL } from 'node:url'
 import { defineConfig } from 'vite'
-import vue from '@vitejs/plugin-vue'
-import tailwindcss from 'tailwindcss'
-import autoprefixer from 'autoprefixer'
+import react from '@vitejs/plugin-react'
+import path from 'path'
 
 export default defineConfig({
-  plugins: [vue()],
-  css: {
-    // Force PostCSS from this project — ignore parent D:\website\postcss.config.js
-    postcss: {
-      plugins: [tailwindcss(), autoprefixer()],
-    },
-  },
+  plugins: [react()],
   resolve: {
     alias: {
-      '@': fileURLToPath(new URL('./src', import.meta.url)),
+      '@': path.resolve(__dirname, './src'),
     },
   },
-  server: {
-    proxy: {
-      '/api': {
-        target: 'http://localhost:8080',
-        changeOrigin: true,
-        ws: true,
-      },
-      '/uploads': {
-        target: 'http://localhost:8080',
-        changeOrigin: true,
-      },
-    },
-  },
+  server: { port: 5173 },
 })

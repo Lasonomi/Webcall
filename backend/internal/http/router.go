@@ -3,12 +3,11 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"regexp"
 	"strings"
-	"time"
 
 	appauth "webcall/backend/internal/auth"
 	"webcall/backend/internal/realtime"
@@ -29,9 +28,6 @@ type contextKey string
 const userIDKey contextKey = "userID"
 
 func NewRouter(st *store.Store, tokens *appauth.Service, frontendOrigin string) http.Handler {
-	if strings.TrimSpace(frontendOrigin) == "" {
-		frontendOrigin = "http://localhost:5173"
-	}
 	r := &Router{
 		store:          st,
 		tokens:         tokens,
@@ -40,19 +36,15 @@ func NewRouter(st *store.Store, tokens *appauth.Service, frontendOrigin string) 
 		rt:             realtime.NewHub(frontendOrigin),
 	}
 	r.voice.SetJoinAuthorizer(func(userID, serverID, channelID, peerID string) error {
-		actualServerID, _, _, err := st.GetVoiceChannel(channelID, userID)
+		voiceServerID, _, _, err := st.GetVoiceChannel(channelID, userID)
 		if err != nil {
 			return err
 		}
-		if actualServerID != serverID {
-			return errors.New("server and channel do not match")
+		if voiceServerID != serverID {
+			return fmt.Errorf("channel does not belong to this server")
 		}
-		user := st.GetByID(userID)
-		if user == nil {
-			return errors.New("user not found")
-		}
-		if strings.TrimSpace(user.PeerID) == "" || strings.TrimSpace(user.PeerID) != strings.TrimSpace(peerID) {
-			return errors.New("invalid peer id")
+		if peerID != userID {
+			return fmt.Errorf("invalid voice identity")
 		}
 		return nil
 	})
@@ -153,27 +145,15 @@ func logging(next http.Handler) http.Handler {
 }
 
 func (r *Router) cors(next http.Handler) http.Handler {
-	allowed := parseOrigins(r.frontendOrigin)
+	origin := r.frontendOrigin
+	if origin == "" {
+		origin = "http://localhost:5173"
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		origin := strings.TrimRight(strings.TrimSpace(req.Header.Get("Origin")), "/")
-		if origin != "" {
-			if _, ok := allowed["*"]; ok {
-				w.Header().Set("Access-Control-Allow-Origin", "*")
-			} else if _, ok := allowed[origin]; ok {
-				w.Header().Set("Access-Control-Allow-Origin", origin)
-				w.Header().Set("Access-Control-Allow-Credentials", "true")
-			} else {
-				if req.Method == http.MethodOptions {
-					writeError(w, http.StatusForbidden, "origin not allowed")
-					return
-				}
-				writeError(w, http.StatusForbidden, "origin not allowed")
-				return
-			}
-		}
+		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Max-Age", "600")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
 		w.Header().Set("Vary", "Origin")
 		if req.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -181,20 +161,6 @@ func (r *Router) cors(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, req)
 	})
-}
-
-func parseOrigins(raw string) map[string]struct{} {
-	allowed := make(map[string]struct{})
-	for _, part := range strings.Split(raw, ",") {
-		part = strings.TrimRight(strings.TrimSpace(part), "/")
-		if part != "" {
-			allowed[part] = struct{}{}
-		}
-	}
-	if len(allowed) == 0 {
-		allowed["http://localhost:5173"] = struct{}{}
-	}
-	return allowed
 }
 
 func (r *Router) auth(next http.Handler) http.Handler {
@@ -286,25 +252,7 @@ func (r *Router) login(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	user := r.store.GetByLogin(strings.TrimSpace(in.Login))
-	log.Printf("LOGIN ATTEMPT: %s", in.Login)
-
-	if user == nil {
-		log.Printf("USER NOT FOUND")
-		writeError(w, http.StatusUnauthorized, "invalid username/email or password")
-		return
-	}
-
-	log.Printf("USER FOUND: username=%s email=%s", user.Username, user.Email)
-
-	ok := appauth.VerifyPassword(
-		in.Password,
-		user.PasswordHash,
-		user.PasswordSalt,
-	)
-
-	log.Printf("PASSWORD MATCH: %v", ok)
-
-	if !ok {
+	if user == nil || !appauth.VerifyPassword(in.Password, user.PasswordHash, user.PasswordSalt) {
 		writeError(w, http.StatusUnauthorized, "invalid username/email or password")
 		return
 	}
@@ -436,7 +384,7 @@ func (r *Router) removeFriend(w http.ResponseWriter, req *http.Request) {
 
 func publicUser(u *store.User) store.PublicUser {
 	// Use store helper logic via PublicByIDs pattern — inline online check
-	online := u.PeerID != "" && !u.LastSeen.IsZero() && time.Since(u.LastSeen) <= 90*time.Second
+	online := u.PeerID != "" && !u.LastSeen.IsZero()
 	peerID := ""
 	if online {
 		peerID = u.PeerID

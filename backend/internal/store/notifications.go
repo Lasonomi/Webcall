@@ -1,7 +1,9 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -107,4 +109,21 @@ func (s *Store) MarkAllNotificationsRead(userID string) error {
 	return err
 }
 
-// Notifications use the realtime presence hub; no separate users.online flag is required.
+// SetUserOnline flag on users table if column exists
+func (s *Store) SetUserOnline(userID string, online bool) {
+	// best-effort; column may not exist on older DBs
+	val := 0
+	if online {
+		val = 1
+	}
+	_, _ = s.db.Exec(`UPDATE users SET online = ? WHERE id = ?`, val, userID)
+}
+
+func (s *Store) EnsureOnlineColumn() {
+	_, _ = s.db.Exec(`ALTER TABLE users ADD COLUMN online TINYINT(1) NOT NULL DEFAULT 0`)
+	// ignore duplicate column errors
+	_ = strings.TrimSpace
+}
+
+// silence unused if sql import only used in other files - keep sql for Null types elsewhere
+var _ = sql.ErrNoRows

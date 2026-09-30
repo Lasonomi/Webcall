@@ -135,8 +135,8 @@ func (r *Router) voiceWS(w http.ResponseWriter, req *http.Request) {
 
 func (r *Router) voiceHealth(w http.ResponseWriter, req *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":      true,
-		"voice":   r.voice != nil,
+		"ok":    true,
+		"voice": r.voice != nil,
 		"service": "webcall-voice",
 	})
 }

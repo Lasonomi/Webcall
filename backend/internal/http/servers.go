@@ -205,21 +205,33 @@ func (r *Router) createChannelMessage(w http.ResponseWriter, req *http.Request) 
 	serverID := req.PathValue("id")
 	channelID := req.PathValue("channelId")
 	var in struct {
-		Content        string `json:"content"`
-		AttachmentURL  string `json:"attachment_url"`
-		AttachmentType string `json:"attachment_type"`
-		ReplyToID      string `json:"reply_to_id"`
+		Content         string `json:"content"`
+		AttachmentURL   string `json:"attachment_url"`
+		AttachmentType  string `json:"attachment_type"`
+		ReplyToID       string `json:"reply_to_id"`
+		ClientMessageID string `json:"client_message_id"`
 	}
 	if !decodeJSON(w, req, &in) {
 		return
 	}
-	msg, err := r.store.CreateChannelMessage(serverID, channelID, currentUserID(req), in.Content, in.AttachmentURL, in.AttachmentType, in.ReplyToID)
+	msg, err := r.store.CreateChannelMessage(serverID, channelID, currentUserID(req), in.Content, in.AttachmentURL, in.AttachmentType, in.ReplyToID, in.ClientMessageID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Broadcast only AFTER successful DB write
+	if r.rt != nil {
+		memberIDs := r.store.ServerMemberIDs(serverID)
+		r.rt.Publish(memberIDs, map[string]any{
+			"type":       "channel:message",
+			"server_id":  serverID,
+			"channel_id": channelID,
+			"message":    msg,
+		})
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{"message": msg})
 }
+
 
 func (r *Router) updateChannelMessage(w http.ResponseWriter, req *http.Request) {
 	id := req.PathValue("messageId")

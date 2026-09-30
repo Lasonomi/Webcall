@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -37,17 +36,11 @@ func NewHub(allowedOrigin string) *Hub {
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
 			CheckOrigin: func(r *http.Request) bool {
-				origin := strings.TrimRight(strings.TrimSpace(r.Header.Get("Origin")), "/")
-				if origin == "" {
+				if allowedOrigin == "" || allowedOrigin == "*" {
 					return true
 				}
-				for _, allowed := range strings.Split(allowedOrigin, ",") {
-					allowed = strings.TrimRight(strings.TrimSpace(allowed), "/")
-					if allowed == "*" || allowed == origin {
-						return true
-					}
-				}
-				return allowedOrigin == ""
+				o := r.Header.Get("Origin")
+				return o == allowedOrigin || o == ""
 			},
 		},
 	}

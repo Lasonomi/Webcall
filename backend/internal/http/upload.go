@@ -11,7 +11,7 @@ import (
 	"webcall/backend/internal/store"
 )
 
-const maxUploadBytes = 10 << 20 // 10 MB
+const maxUploadBytes = 15 << 20 // 15 MB
 
 var allowedExt = map[string]string{
 	".jpg":  "image/jpeg",
@@ -19,14 +19,22 @@ var allowedExt = map[string]string{
 	".png":  "image/png",
 	".gif":  "image/gif",
 	".webp": "image/webp",
+	".bmp":  "image/bmp",
+	".heic": "image/heic",
 	".pdf":  "application/pdf",
 	".txt":  "text/plain",
 	".zip":  "application/zip",
+	".rar":  "application/vnd.rar",
 	".mp3":  "audio/mpeg",
+	".wav":  "audio/wav",
+	".ogg":  "audio/ogg",
 	".mp4":  "video/mp4",
 	".webm": "video/webm",
+	".mov":  "video/quicktime",
 	".doc":  "application/msword",
 	".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	".xls":  "application/vnd.ms-excel",
+	".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
 
 func (r *Router) uploadDir() string {
@@ -38,40 +46,71 @@ func (r *Router) uploadDir() string {
 	return dir
 }
 
-// POST /api/upload  multipart field "file"
 func (r *Router) uploadFile(w http.ResponseWriter, req *http.Request) {
-	req.Body = http.MaxBytesReader(w, req.Body, maxUploadBytes+512)
+	if req.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "POST required")
+		return
+	}
+	req.Body = http.MaxBytesReader(w, req.Body, maxUploadBytes+1024)
 	if err := req.ParseMultipartForm(maxUploadBytes); err != nil {
-		writeError(w, http.StatusBadRequest, "file too large (max 10MB) or invalid form")
+		writeError(w, http.StatusBadRequest, "file too large (max 15MB) or invalid form: "+err.Error())
 		return
 	}
 	file, header, err := req.FormFile("file")
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "file field is required")
-		return
+		// try alternate field names
+		file, header, err = req.FormFile("image")
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "file field is required (form field name: file)")
+			return
+		}
 	}
 	defer file.Close()
 
 	ext := strings.ToLower(filepath.Ext(header.Filename))
 	mime, ok := allowedExt[ext]
 	if !ok {
-		writeError(w, http.StatusBadRequest, "file type not allowed")
-		return
+		// fallback: sniff content-type from header
+		ct := strings.ToLower(header.Header.Get("Content-Type"))
+		switch {
+		case strings.HasPrefix(ct, "image/"):
+			mime = ct
+			if ext == "" {
+				ext = ".img"
+			}
+			ok = true
+		case strings.HasPrefix(ct, "video/"):
+			mime = ct
+			if ext == "" {
+				ext = ".vid"
+			}
+			ok = true
+		case strings.HasPrefix(ct, "audio/"):
+			mime = ct
+			if ext == "" {
+				ext = ".aud"
+			}
+			ok = true
+		case ct == "application/pdf":
+			mime = ct
+			if ext == "" {
+				ext = ".pdf"
+			}
+			ok = true
+		}
 	}
-
-	// Optional content-type check from client
-	if ct := header.Header.Get("Content-Type"); ct != "" && !strings.HasPrefix(ct, "application/octet-stream") {
-		// soft check — still trust extension whitelist
+	if !ok {
+		writeError(w, http.StatusBadRequest, "file type not allowed: "+ext+" (use images, pdf, docs, audio, video, zip)")
+		return
 	}
 
 	id := store.NewIDPublic()
 	name := id + ext
-	dir := r.uploadDir()
-	destPath := filepath.Join(dir, name)
+	destPath := filepath.Join(r.uploadDir(), name)
 
 	out, err := os.Create(destPath)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save file")
+		writeError(w, http.StatusInternalServerError, "failed to save file: "+err.Error())
 		return
 	}
 	defer out.Close()
@@ -84,11 +123,15 @@ func (r *Router) uploadFile(w http.ResponseWriter, req *http.Request) {
 	}
 	if written > maxUploadBytes {
 		_ = os.Remove(destPath)
-		writeError(w, http.StatusBadRequest, "file too large (max 10MB)")
+		writeError(w, http.StatusBadRequest, "file too large (max 15MB)")
+		return
+	}
+	if written == 0 {
+		_ = os.Remove(destPath)
+		writeError(w, http.StatusBadRequest, "empty file")
 		return
 	}
 
-	// Public URL path
 	urlPath := "/uploads/" + name
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"url":        urlPath,
@@ -113,13 +156,12 @@ func mimeCategory(mime string) string {
 	}
 }
 
-// Safe static file server for /uploads/*
 func (r *Router) serveUpload(w http.ResponseWriter, req *http.Request) {
 	name := req.PathValue("file")
 	if name == "" {
 		name = strings.TrimPrefix(req.URL.Path, "/uploads/")
 	}
-	name = filepath.Base(name) // prevent path traversal
+	name = filepath.Base(name)
 	if name == "." || name == "/" || name == "" {
 		http.NotFound(w, req)
 		return
@@ -129,7 +171,13 @@ func (r *Router) serveUpload(w http.ResponseWriter, req *http.Request) {
 		http.NotFound(w, req)
 		return
 	}
-	// Cache uploaded assets briefly
+	// CORS for <img> from frontend origin
+	origin := req.Header.Get("Origin")
+	if origin != "" {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+	} else {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+	}
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	http.ServeFile(w, req, path)
 }

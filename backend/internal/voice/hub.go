@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -37,13 +36,20 @@ type client struct {
 }
 
 // Hub manages voice rooms and WebSocket signaling (mesh coordination).
+type callSession struct {
+	CallerID string
+	CalleeID string
+}
+
 type Hub struct {
 	mu      sync.RWMutex
 	clients map[*client]bool
 	// channelID -> userID -> client
 	rooms map[string]map[string]*client
-	// userID -> client (one voice session per user)
+	// userID -> client (one realtime RTC socket per user)
 	byUser        map[string]*client
+	calls         map[string]callSession
+	activeCall    map[string]string
 	register      chan *client
 	unregister    chan *client
 	upgrader      websocket.Upgrader
@@ -55,23 +61,19 @@ func NewHub(allowedOrigin string) *Hub {
 		clients:    make(map[*client]bool),
 		rooms:      make(map[string]map[string]*client),
 		byUser:     make(map[string]*client),
+		calls:      make(map[string]callSession),
+		activeCall: make(map[string]string),
 		register:   make(chan *client),
 		unregister: make(chan *client),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
 			CheckOrigin: func(r *http.Request) bool {
-				origin := strings.TrimRight(strings.TrimSpace(r.Header.Get("Origin")), "/")
-				if origin == "" {
+				origin := r.Header.Get("Origin")
+				if allowedOrigin == "" || allowedOrigin == "*" {
 					return true
 				}
-				for _, allowed := range strings.Split(allowedOrigin, ",") {
-					allowed = strings.TrimRight(strings.TrimSpace(allowed), "/")
-					if allowed == "*" || allowed == origin {
-						return true
-					}
-				}
-				return allowedOrigin == ""
+				return origin == allowedOrigin || origin == ""
 			},
 		},
 	}
@@ -114,6 +116,21 @@ func (h *Hub) removeClientLocked(c *client) {
 	delete(h.clients, c)
 	if h.byUser[c.userID] == c {
 		delete(h.byUser, c.userID)
+	}
+	for sessionID, call := range h.calls {
+		if call.CallerID != c.userID && call.CalleeID != c.userID {
+			continue
+		}
+		otherID := call.CallerID
+		if otherID == c.userID {
+			otherID = call.CalleeID
+		}
+		if other := h.byUser[otherID]; other != nil {
+			h.sendTo(other, map[string]any{"type": "call:end", "from": c.userID, "session_id": sessionID})
+		}
+		delete(h.calls, sessionID)
+		delete(h.activeCall, call.CallerID)
+		delete(h.activeCall, call.CalleeID)
 	}
 	if c.channelID != "" {
 		room := h.rooms[c.channelID]
@@ -282,6 +299,12 @@ func (h *Hub) readPump(c *client) {
 			muted, _ := msg["muted"].(bool)
 			deafened, _ := msg["deafened"].(bool)
 			h.handleMuteState(c, muted, deafened)
+		case "call:invite":
+			h.handleCallInvite(c, msg)
+		case "call:accept", "call:reject", "call:cancel", "call:busy", "call:end":
+			h.handleCallState(c, msg)
+		case "rtc:signal":
+			h.handleRTCSignal(c, msg)
 		case "signal":
 			// Mesh signaling relay: { type, to, from, data }
 			h.handleSignal(c, msg)
@@ -424,9 +447,91 @@ func (h *Hub) handleMuteState(c *client, muted, deafened bool) {
 	}, nil)
 }
 
+func (h *Hub) handleCallInvite(c *client, msg map[string]any) {
+	to, _ := msg["to"].(string)
+	sessionID, _ := msg["session_id"].(string)
+	if to == "" || sessionID == "" || to == c.userID {
+		h.sendTo(c, map[string]any{"type": "error", "message": "invalid call target"})
+		return
+	}
+
+	h.mu.Lock()
+	target := h.byUser[to]
+	_, callerBusy := h.activeCall[c.userID]
+	_, targetBusy := h.activeCall[to]
+	if target != nil && target.channelID != "" {
+		targetBusy = true
+	}
+	if target == nil || callerBusy || targetBusy || c.channelID != "" {
+		h.mu.Unlock()
+		h.sendTo(c, map[string]any{"type": "call:busy", "from": to, "session_id": sessionID})
+		return
+	}
+
+	h.calls[sessionID] = callSession{CallerID: c.userID, CalleeID: to}
+	h.activeCall[c.userID] = sessionID
+	h.activeCall[to] = sessionID
+	payload := map[string]any{
+		"type": "call:invite", "from": c.userID, "session_id": sessionID, "mode": msg["mode"],
+		"from_user": map[string]any{"user_id": c.userID, "username": c.username, "display_name": c.displayName},
+	}
+	h.mu.Unlock()
+	h.sendTo(target, payload)
+}
+
+func (h *Hub) handleCallState(c *client, msg map[string]any) {
+	to, _ := msg["to"].(string)
+	sessionID, _ := msg["session_id"].(string)
+	if to == "" || sessionID == "" {
+		return
+	}
+	h.mu.Lock()
+	call, ok := h.calls[sessionID]
+	validPair := ok && ((call.CallerID == c.userID && call.CalleeID == to) || (call.CalleeID == c.userID && call.CallerID == to))
+	if !validPair {
+		h.mu.Unlock()
+		return
+	}
+	target := h.byUser[to]
+	typ, _ := msg["type"].(string)
+	if typ != "call:accept" {
+		delete(h.calls, sessionID)
+		delete(h.activeCall, call.CallerID)
+		delete(h.activeCall, call.CalleeID)
+	}
+	h.mu.Unlock()
+	if target != nil {
+		h.sendTo(target, map[string]any{"type": typ, "from": c.userID, "session_id": sessionID})
+	}
+}
+
+func (h *Hub) handleRTCSignal(c *client, msg map[string]any) {
+	to, _ := msg["to"].(string)
+	scope, _ := msg["scope"].(string)
+	sessionID, _ := msg["session_id"].(string)
+	if to == "" || sessionID == "" || to == c.userID {
+		return
+	}
+	h.mu.RLock()
+	target := h.byUser[to]
+	allowed := false
+	if scope == "voice" {
+		allowed = c.channelID != "" && c.channelID == sessionID && target != nil && target.channelID == c.channelID
+	} else {
+		call, ok := h.calls[sessionID]
+		allowed = ok && ((call.CallerID == c.userID && call.CalleeID == to) || (call.CalleeID == c.userID && call.CallerID == to))
+	}
+	h.mu.RUnlock()
+	if target == nil || !allowed {
+		return
+	}
+	msg["from"] = c.userID
+	h.sendTo(target, msg)
+}
+
 func (h *Hub) handleSignal(c *client, msg map[string]any) {
 	to, _ := msg["to"].(string)
-	if to == "" {
+	if to == "" || to == c.userID {
 		return
 	}
 	h.mu.RLock()

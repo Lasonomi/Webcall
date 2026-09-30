@@ -73,6 +73,10 @@ func New(dsn string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := s.migrateUnifiedMessages(); err != nil {
+		// non-fatal soft migrate
+		_ = err
+	}
 	return s, nil
 }
 
@@ -125,7 +129,13 @@ func (s *Store) migrate() error {
 	if err := s.migrateDM(); err != nil {
 		return err
 	}
-	return s.migrateProfile()
+	if err := s.migrateProfile(); err != nil {
+		return err
+	}
+	if err := s.migrateUnifiedMessages(); err != nil {
+		return err
+	}
+	return nil
 }
 
 var idCounter uint64
@@ -187,6 +197,7 @@ func (s *Store) scanUser(row interface{ Scan(dest ...any) error }) (*User, error
 	}
 	return &u, nil
 }
+
 
 func (s *Store) GetByID(id string) *User {
 	s.mu.RLock()
