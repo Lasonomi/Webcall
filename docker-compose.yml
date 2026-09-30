@@ -1,0 +1,50 @@
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: webcall
+      MYSQL_DATABASE: webcall
+      MYSQL_USER: webcall
+      MYSQL_PASSWORD: webcall
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uwebcall", "-pwebcall"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      MYSQL_DSN: "webcall:webcall@tcp(mysql:3306)/webcall?parseTime=true&loc=UTC"
+      JWT_SECRET: "change-me-in-production-webcall-secret"
+      FRONTEND_ORIGIN: "http://localhost:5173"
+      PORT: "8080"
+      UPLOAD_DIR: "/app/uploads"
+    ports:
+      - "8080:8080"
+    volumes:
+      - uploads_data:/app/uploads
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: http://localhost:8080
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+volumes:
+  mysql_data:
+  uploads_data:

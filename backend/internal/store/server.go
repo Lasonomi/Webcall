@@ -943,3 +943,192 @@ func (s *Store) GetChannelMeta(channelID, userID string) (serverID, name, chType
 func (s *Store) ServerMemberIDs(serverID string) []string {
 	return s.listIDs(`SELECT user_id FROM server_members WHERE server_id = ?`, serverID)
 }
+
+func (s *Store) requireManageChannels(serverID, userID string) (string, error) {
+	var role string
+	err := s.db.QueryRow(`SELECT role FROM server_members WHERE server_id = ? AND user_id = ?`, serverID, userID).Scan(&role)
+	if err == sql.ErrNoRows {
+		return "", errors.New("access denied")
+	}
+	if err != nil {
+		return "", err
+	}
+	if role != "OWNER" && role != "ADMIN" {
+		return "", errors.New("unauthorized: only owner or admin can manage channels")
+	}
+	return role, nil
+}
+
+// CreateChannel creates a room/channel. Owner/Admin only.
+func (s *Store) CreateChannel(serverID, userID, name, chType, category string, allowMessage, allowUpload, allowVoice, allowVideo bool) (*Channel, error) {
+	name = strings.TrimSpace(name)
+	if len(name) < 1 || len(name) > 64 {
+		return nil, errors.New("channel name must be 1-64 characters")
+	}
+	chType = strings.ToLower(strings.TrimSpace(chType))
+	if chType != "text" && chType != "voice" {
+		chType = "text"
+	}
+	if category == "" {
+		if chType == "voice" {
+			category = "VOICE CHANNELS"
+		} else {
+			category = "TEXT CHANNELS"
+		}
+	}
+	// defaults by type
+	if chType == "voice" {
+		allowVoice = true
+		if !allowVideo {
+			allowVideo = true
+		}
+		allowMessage = false
+	} else {
+		if !allowMessage && !allowUpload {
+			allowMessage = true
+			allowUpload = true
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, err := s.requireManageChannels(serverID, userID); err != nil {
+		return nil, err
+	}
+
+	var maxPos int
+	_ = s.db.QueryRow(`SELECT COALESCE(MAX(position), -1) FROM channels WHERE server_id = ?`, serverID).Scan(&maxPos)
+
+	id := newID()
+	now := time.Now().UTC()
+	_, err := s.db.Exec(`
+INSERT INTO channels (id, server_id, name, type, category, position, allow_message, allow_upload, allow_voice, allow_video, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, serverID, name, chType, category, maxPos+1,
+		allowMessage, allowUpload, allowVoice, allowVideo, now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &Channel{
+		ID: id, ServerID: serverID, Name: name, Type: chType, Category: category,
+		Position: maxPos + 1, AllowMessage: allowMessage, AllowUpload: allowUpload,
+		AllowVoice: allowVoice, AllowVideo: allowVideo, CreatedAt: now,
+	}, nil
+}
+
+func (s *Store) UpdateChannel(serverID, channelID, userID, name string, allowMessage, allowUpload, allowVoice, allowVideo *bool) (*Channel, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, err := s.requireManageChannels(serverID, userID); err != nil {
+		return nil, err
+	}
+
+	var ch Channel
+	err := s.db.QueryRow(`
+SELECT id, server_id, name, type, category, position, allow_message, allow_upload, allow_voice, allow_video, created_at
+FROM channels WHERE id = ? AND server_id = ?`, channelID, serverID).Scan(
+		&ch.ID, &ch.ServerID, &ch.Name, &ch.Type, &ch.Category, &ch.Position,
+		&ch.AllowMessage, &ch.AllowUpload, &ch.AllowVoice, &ch.AllowVideo, &ch.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, errors.New("channel not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if name = strings.TrimSpace(name); name != "" {
+		ch.Name = name
+	}
+	if allowMessage != nil {
+		ch.AllowMessage = *allowMessage
+	}
+	if allowUpload != nil {
+		ch.AllowUpload = *allowUpload
+	}
+	if allowVoice != nil {
+		ch.AllowVoice = *allowVoice
+	}
+	if allowVideo != nil {
+		ch.AllowVideo = *allowVideo
+	}
+
+	_, err = s.db.Exec(`
+UPDATE channels SET name = ?, allow_message = ?, allow_upload = ?, allow_voice = ?, allow_video = ?
+WHERE id = ? AND server_id = ?`,
+		ch.Name, ch.AllowMessage, ch.AllowUpload, ch.AllowVoice, ch.AllowVideo, channelID, serverID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &ch, nil
+}
+
+func (s *Store) DeleteChannel(serverID, channelID, userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, err := s.requireManageChannels(serverID, userID); err != nil {
+		return err
+	}
+
+	var count int
+	_ = s.db.QueryRow(`SELECT COUNT(1) FROM channels WHERE server_id = ?`, serverID).Scan(&count)
+	if count <= 1 {
+		return errors.New("cannot delete the last channel")
+	}
+
+	res, err := s.db.Exec(`DELETE FROM channels WHERE id = ? AND server_id = ?`, channelID, serverID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return errors.New("channel not found")
+	}
+	return nil
+}
+
+// SetMemberRole promotes/demotes. Only OWNER can set ADMIN/MEMBER. Cannot demote OWNER.
+func (s *Store) SetMemberRole(serverID, actorID, targetUserID, newRole string) error {
+	newRole = strings.ToUpper(strings.TrimSpace(newRole))
+	if newRole != "ADMIN" && newRole != "MEMBER" {
+		return errors.New("role must be ADMIN or MEMBER")
+	}
+	if actorID == targetUserID {
+		return errors.New("cannot change your own role")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var actorRole string
+	err := s.db.QueryRow(`SELECT role FROM server_members WHERE server_id = ? AND user_id = ?`, serverID, actorID).Scan(&actorRole)
+	if err == sql.ErrNoRows {
+		return errors.New("access denied")
+	}
+	if err != nil {
+		return err
+	}
+	if actorRole != "OWNER" {
+		return errors.New("unauthorized: only the owner can change member roles")
+	}
+
+	var targetRole string
+	err = s.db.QueryRow(`SELECT role FROM server_members WHERE server_id = ? AND user_id = ?`, serverID, targetUserID).Scan(&targetRole)
+	if err == sql.ErrNoRows {
+		return errors.New("member not found")
+	}
+	if err != nil {
+		return err
+	}
+	if targetRole == "OWNER" {
+		return errors.New("cannot change the owner role; use transfer ownership")
+	}
+
+	_, err = s.db.Exec(`UPDATE server_members SET role = ? WHERE server_id = ? AND user_id = ?`, newRole, serverID, targetUserID)
+	return err
+}

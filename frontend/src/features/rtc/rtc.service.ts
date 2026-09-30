@@ -642,6 +642,124 @@ class WebRTCService {
   }
 
 
+
+  async toggleScreenShare() {
+    const state = useRTCStore.getState()
+    const scope: 'direct' | 'voice' | null = state.directCall ? 'direct' : state.voice.active ? 'voice' : null
+    if (!scope) return
+
+    const sharing = scope === 'voice' ? state.voice.screenSharing : false
+    if (sharing) {
+      await this.stopScreenShare(scope)
+      return
+    }
+
+    let displayStream: MediaStream
+    try {
+      displayStream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: 15 },
+        audio: false,
+      })
+    } catch (error) {
+      throw new Error(error instanceof Error ? error.message : 'Screen share cancelled or blocked')
+    }
+
+    const screenTrack = displayStream.getVideoTracks()[0]
+    if (!screenTrack) throw new Error('No screen track available')
+
+    const baseStream = await this.ensureStream(scope, true)
+    // remove existing video tracks from local stream then add screen
+    for (const t of baseStream.getVideoTracks()) {
+      baseStream.removeTrack(t)
+      t.stop()
+    }
+    baseStream.addTrack(screenTrack)
+
+    for (const [key, pc] of this.peers) {
+      const meta = this.peerMeta.get(key)
+      if (meta?.scope !== scope) continue
+      const sender = pc.getSenders().find((item) => item.track?.kind === 'video')
+      if (sender) {
+        await sender.replaceTrack(screenTrack)
+      } else {
+        pc.addTrack(screenTrack, baseStream)
+      }
+      if (pc.connectionState === 'connected' || pc.signalingState === 'stable') {
+        try {
+          await this.renegotiate(meta, pc)
+        } catch (e) {
+          console.warn('renegotiate screen', e)
+        }
+      }
+    }
+
+    screenTrack.onended = () => {
+      void this.stopScreenShare(scope)
+    }
+
+    if (scope === 'voice') {
+      useRTCStore.getState().patchVoice({ screenSharing: true, cameraOn: true })
+      useRTCStore.getState().setVoiceLocalStream(baseStream)
+    } else if (state.directCall) {
+      useRTCStore.getState().setDirectCall({ ...state.directCall, cameraOn: true })
+      useRTCStore.getState().setDirectLocalStream(baseStream)
+    }
+  }
+
+  private async stopScreenShare(scope: 'direct' | 'voice') {
+    const state = useRTCStore.getState()
+    const stream = scope === 'voice' ? this.voiceLocalStream : this.directLocalStream
+    if (!stream) {
+      if (scope === 'voice') useRTCStore.getState().patchVoice({ screenSharing: false })
+      return
+    }
+
+    for (const t of stream.getVideoTracks()) {
+      stream.removeTrack(t)
+      t.stop()
+    }
+
+    // try restore camera if voice allows video
+    let camTrack: MediaStreamTrack | null = null
+    if (scope === 'voice' ? state.voice.allowVideo : true) {
+      try {
+        const cam = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 640 }, height: { ideal: 360 } },
+          audio: false,
+        })
+        camTrack = cam.getVideoTracks()[0] || null
+        if (camTrack) {
+          stream.addTrack(camTrack)
+          camTrack.enabled = false
+        }
+      } catch {
+        /* camera optional after screen share */
+      }
+    }
+
+    for (const [key, pc] of this.peers) {
+      const meta = this.peerMeta.get(key)
+      if (meta?.scope !== scope) continue
+      const sender = pc.getSenders().find((item) => item.track?.kind === 'video')
+      if (sender) {
+        await sender.replaceTrack(camTrack)
+      }
+      if (pc.connectionState === 'connected') {
+        try {
+          await this.renegotiate(meta, pc)
+        } catch {}
+      }
+    }
+
+    if (scope === 'voice') {
+      useRTCStore.getState().patchVoice({ screenSharing: false, cameraOn: false })
+      useRTCStore.getState().setVoiceLocalStream(stream)
+    } else if (state.directCall) {
+      useRTCStore.getState().setDirectCall({ ...state.directCall, cameraOn: Boolean(camTrack?.enabled) })
+      useRTCStore.getState().setDirectLocalStream(stream)
+    }
+  }
+
   async toggleCamera() {
     const state = useRTCStore.getState()
     const scope: 'direct' | 'voice' | null = state.directCall ? 'direct' : state.voice.active ? 'voice' : null

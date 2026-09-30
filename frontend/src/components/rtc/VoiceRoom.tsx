@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { Camera, CameraOff, LogIn, LogOut, Mic, MicOff, Volume2, VolumeX } from 'lucide-react'
+import { Camera, CameraOff, LogIn, LogOut, Mic, MicOff, Monitor, MonitorOff, Volume2, VolumeX } from 'lucide-react'
 import { Avatar } from '@/components/ui/Avatar'
 import { Button } from '@/components/ui/Button'
 import { useRTCStore } from '@/features/rtc/rtc.store'
@@ -95,7 +95,8 @@ export function VoiceRoom({ channel, serverId, serverName }: { channel: Channel;
       <div className="flex shrink-0 items-center justify-center gap-2 border-t border-border bg-surface/60 p-3">
         <Button size="icon" variant="secondary" onClick={() => void rtcService.toggleMute()}>{voice.muted ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}</Button>
         <Button size="icon" variant="secondary" onClick={() => void rtcService.toggleDeafen()}>{voice.deafened ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}</Button>
-        {voice.allowVideo && <Button size="icon" variant="secondary" onClick={() => void rtcService.toggleCamera().catch((error) => alert(error instanceof Error ? error.message : 'Camera unavailable'))}>{voice.cameraOn ? <Camera className="h-4 w-4" /> : <CameraOff className="h-4 w-4" />}</Button>}
+        {voice.allowVideo && <Button size="icon" variant="secondary" onClick={() => void rtcService.toggleCamera().catch((error) => alert(error instanceof Error ? error.message : 'Camera unavailable'))}>{voice.cameraOn && !voice.screenSharing ? <Camera className="h-4 w-4" /> : <CameraOff className="h-4 w-4" />}</Button>}
+        <Button size="icon" variant="secondary" title="Share screen" onClick={() => void rtcService.toggleScreenShare().catch((error) => alert(error instanceof Error ? error.message : 'Screen share failed'))}>{voice.screenSharing ? <MonitorOff className="h-4 w-4" /> : <Monitor className="h-4 w-4" />}</Button>
         <Button size="icon" variant="danger" onClick={() => void rtcService.leaveVoice()}><LogOut className="h-4 w-4" /></Button>
       </div>
     </div>

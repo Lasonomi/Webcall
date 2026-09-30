@@ -93,6 +93,23 @@ export const api = {
   listMembers: (id: string) => request<{ members: any[] }>(`/api/servers/${id}/members`),
   listChannelMessages: (sid: string, cid: string) =>
     request<{ messages: any[] }>(`/api/servers/${sid}/channels/${cid}/messages`),
+  createChannel: (sid: string, body: object) =>
+    request(`/api/servers/${sid}/channels`, { method: 'POST', body: JSON.stringify(body) }),
+  updateChannel: (sid: string, cid: string, body: object) =>
+    request(`/api/servers/${sid}/channels/${cid}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteChannel: (sid: string, cid: string) =>
+    request(`/api/servers/${sid}/channels/${cid}`, { method: 'DELETE' }),
+  updateServer: (sid: string, body: object) =>
+    request(`/api/servers/${sid}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteServer: (sid: string) =>
+    request(`/api/servers/${sid}`, { method: 'DELETE' }),
+  createInvite: (sid: string) =>
+    request(`/api/servers/${sid}/invites`, { method: 'POST', body: JSON.stringify({}) }),
+  setMemberRole: (sid: string, userId: string, role: string) =>
+    request(`/api/servers/${sid}/members/${userId}/role`, {
+      method: 'PATCH',
+      body: JSON.stringify({ role }),
+    }),
   createChannelMessage: (sid: string, cid: string, body: object) =>
     request(`/api/servers/${sid}/channels/${cid}/messages`, {
       method: 'POST',

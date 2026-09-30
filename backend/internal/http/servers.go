@@ -273,3 +273,88 @@ func (r *Router) reactChannelMessage(w http.ResponseWriter, req *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"reactions": reactions, "message_id": id})
 }
+
+func (r *Router) createChannel(w http.ResponseWriter, req *http.Request) {
+	serverID := req.PathValue("id")
+	var in struct {
+		Name         string `json:"name"`
+		Type         string `json:"type"`
+		Category     string `json:"category"`
+		AllowMessage *bool  `json:"allow_message"`
+		AllowUpload  *bool  `json:"allow_upload"`
+		AllowVoice   *bool  `json:"allow_voice"`
+		AllowVideo   *bool  `json:"allow_video"`
+	}
+	if !decodeJSON(w, req, &in) {
+		return
+	}
+	am, au, av, avid := true, true, false, false
+	if in.Type == "voice" {
+		am, au, av, avid = false, false, true, true
+	}
+	if in.AllowMessage != nil {
+		am = *in.AllowMessage
+	}
+	if in.AllowUpload != nil {
+		au = *in.AllowUpload
+	}
+	if in.AllowVoice != nil {
+		av = *in.AllowVoice
+	}
+	if in.AllowVideo != nil {
+		avid = *in.AllowVideo
+	}
+	ch, err := r.store.CreateChannel(serverID, currentUserID(req), in.Name, in.Type, in.Category, am, au, av, avid)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"channel": ch})
+}
+
+func (r *Router) updateChannel(w http.ResponseWriter, req *http.Request) {
+	serverID := req.PathValue("id")
+	channelID := req.PathValue("channelId")
+	var in struct {
+		Name         string `json:"name"`
+		AllowMessage *bool  `json:"allow_message"`
+		AllowUpload  *bool  `json:"allow_upload"`
+		AllowVoice   *bool  `json:"allow_voice"`
+		AllowVideo   *bool  `json:"allow_video"`
+	}
+	if !decodeJSON(w, req, &in) {
+		return
+	}
+	ch, err := r.store.UpdateChannel(serverID, channelID, currentUserID(req), in.Name, in.AllowMessage, in.AllowUpload, in.AllowVoice, in.AllowVideo)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"channel": ch})
+}
+
+func (r *Router) deleteChannel(w http.ResponseWriter, req *http.Request) {
+	serverID := req.PathValue("id")
+	channelID := req.PathValue("channelId")
+	if err := r.store.DeleteChannel(serverID, channelID, currentUserID(req)); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (r *Router) setMemberRole(w http.ResponseWriter, req *http.Request) {
+	serverID := req.PathValue("id")
+	userID := req.PathValue("userId")
+	var in struct {
+		Role string `json:"role"`
+	}
+	if !decodeJSON(w, req, &in) {
+		return
+	}
+	if err := r.store.SetMemberRole(serverID, currentUserID(req), userID, in.Role); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user_id": userID, "role": strings.ToUpper(in.Role)})
+}
